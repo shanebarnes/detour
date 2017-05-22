@@ -8,14 +8,23 @@ import (
     "net"
     "os"
     "os/signal"
+    "sync"
     "syscall"
+    "time"
+    "tokenbucket"
 )
 
-const _VERSION string = "0.1.0"
+const _VERSION string = "0.2.0"
 
-type Itinerary struct {
+type Route struct {
+    Bandwidth int64 `json:"bandwidth"`    // Bits per second
+    Buffersize uint64 `json:"buffersize"` // Bytes
     Src string `json:"src"`
     Dst []string `json:"dst"`
+}
+
+type Itinerary struct {
+    Map map[string]Route
 }
 
 func sigHandler(ch *chan os.Signal) {
@@ -34,7 +43,6 @@ func main() {
                   syscall.SIGKILL,
                   syscall.SIGSEGV,
                   syscall.SIGTERM)
-    go sigHandler(&sigs)
 
     log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
@@ -47,7 +55,12 @@ func main() {
     flag.Parse()
 
     itinerary := loadItinerary(itineraryFile)
-    intercept(itinerary)
+
+    for _, m := range itinerary.Map {
+        go intercept(m)
+    }
+
+    sigHandler(&sigs)
 }
 
 func loadItinerary(fileName *string) Itinerary {
@@ -63,17 +76,20 @@ func loadItinerary(fileName *string) Itinerary {
     return itinerary
 }
 
-func intercept(itinerary Itinerary) {
-    listener, err := net.Listen("tcp", itinerary.Src)
+func intercept(route Route) {
+    listener, err := net.Listen("tcp", route.Src)
     if err == nil {
-        log.Println("Listening on", itinerary.Src)
+        log.Println("Listening on", route.Src)
         i := 0
+        count := 0
 
         for {
             con, err := listener.Accept()
             if err == nil {
-                go findRoute(con, itinerary.Dst[i])
-                i = (i + 1) % len(itinerary.Dst)
+                count = count + 1
+                // Round-robin for now
+                go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize)
+                i = (i + 1) % len(route.Dst)
             } else {
                 log.Println(err.Error())
             }
@@ -84,33 +100,51 @@ func intercept(itinerary Itinerary) {
     }
 }
 
-func findRoute(src net.Conn, dstAddr string) {
+func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64) {
     dst, err := net.Dial("tcp", dstAddr)
 
     if err == nil {
-        go reroute(src, dst)
-        reroute(dst, src)
+        log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+
+        var wg sync.WaitGroup
+        wg.Add(1)
+        go reroute(&wg, src, dst, bandwidth, bufferSize)
+        reroute(nil, dst, src, bandwidth, bufferSize)
+        wg.Wait()
+
+        log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
     } else {
         src.Close()
         log.Println(err.Error())
     }
 }
 
-func reroute(src net.Conn, dst net.Conn) {
-    buf := make([]byte, 131072)
+func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64) {
+    tb := tokenbucket.New(uint64(bandwidth), 10 * uint64(bandwidth))
+    buf := make([]byte, bufferSize)
     defer src.Close()
     defer dst.Close()
 
-    log.Println("Opening route:", src.RemoteAddr().String(), dst.RemoteAddr().String())
-
     for {
+        bytes := tb.Remove(bufferSize)
+        if bytes < bufferSize {
+            tb.Return(bytes)
+            time.Sleep(1 * time.Millisecond)
+            continue
+        }
+
         size, err := src.Read(buf)
         if err == nil {
             dst.Write(buf[0:size])
+            if size < int(bufferSize) {
+                tb.Return(bufferSize - uint64(size))
+            }
         } else {
             break
         }
     }
 
-    log.Println("Closing route:", src.RemoteAddr().String(), dst.RemoteAddr().String())
+    if wg != nil {
+        wg.Done()
+    }
 }

@@ -1,7 +1,20 @@
 {
-    "src": "localhost:8443",
-    "dst": [
-        "localhost:48000",
-        "localhost:48001"
-    ]
+    "map": {
+        "100M-limit": {
+            "bandwidth": 100000000,
+            "buffersize": 131072,
+            "src": "localhost:5001",
+            "dst": [
+                "localhost:5002"
+            ]
+        },
+        "no-limit": {
+            "bandwidth": -1,
+            "buffersize": 131072,
+            "src": "localhost:5003",
+            "dst": [
+                "localhost:5004"
+            ]
+        }
+    }
 }
