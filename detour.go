@@ -1,13 +1,16 @@
 package main
 
 import (
+    "bufio"
     "encoding/json"
     "flag"
     "fmt"
     "log"
     "net"
+    "net/http"
     "os"
     "os/signal"
+    "strings"
     "sync"
     "syscall"
     "time"
@@ -19,6 +22,7 @@ const _VERSION string = "0.2.0"
 type Route struct {
     Bandwidth int64 `json:"bandwidth"`    // Bits per second
     Buffersize uint64 `json:"buffersize"` // Bytes
+    Inspect bool `json:"inspect"`         // True = proxy, false = reverse proxy
     Src string `json:"src"`
     Dst []string `json:"dst"`
 }
@@ -87,9 +91,14 @@ func intercept(route Route) {
             con, err := listener.Accept()
             if err == nil {
                 count = count + 1
-                // Round-robin for now
-                go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize)
-                i = (i + 1) % len(route.Dst)
+
+                if route.Inspect {
+                    go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize)
+                } else {
+                    // Round-robin for now
+                    go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize)
+                    i = (i + 1) % len(route.Dst)
+                }
             } else {
                 log.Println(err.Error())
             }
@@ -100,23 +109,51 @@ func intercept(route Route) {
     }
 }
 
-func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64) {
-    dst, err := net.Dial("tcp", dstAddr)
+func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
+    buf := make([]byte, 16384)
+    size, err := src.Read(buf) // Assume one read will include entire HTTP header
 
     if err == nil {
-        log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+        reader := bufio.NewReader(strings.NewReader(string(buf[0:size])))
+        header, _ := http.ReadRequest(reader)
+        dstAddr := header.RequestURI
 
-        var wg sync.WaitGroup
-        wg.Add(1)
-        go reroute(&wg, src, dst, bandwidth, bufferSize)
-        reroute(nil, dst, src, bandwidth, bufferSize)
-        wg.Wait()
+        dst, err := net.Dial("tcp", dstAddr)
 
-        log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+        if err == nil {
+            dst.Write(buf[0:size])
+            startDetour(id, src, dst, bandwidth, bufferSize)
+        } else {
+            src.Close()
+            log.Println(err.Error())
+        }
     } else {
         src.Close()
         log.Println(err.Error())
     }
+}
+
+func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64) {
+    dst, err := net.Dial("tcp", dstAddr)
+
+    if err == nil {
+        startDetour(id, src, dst, bandwidth, bufferSize)
+    } else {
+        src.Close()
+        log.Println(err.Error())
+    }
+}
+
+func startDetour(id int, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64) {
+    log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+
+    var wg sync.WaitGroup
+    wg.Add(1)
+    go reroute(&wg, src, dst, bandwidth, bufferSize)
+    reroute(nil, dst, src, bandwidth, bufferSize)
+    wg.Wait()
+
+    log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
 func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64) {
