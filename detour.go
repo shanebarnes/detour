@@ -2,9 +2,11 @@ package main
 
 import (
     "bufio"
+    "bytes"
     "encoding/json"
     "flag"
     "fmt"
+    "io/ioutil"
     "log"
     "net"
     "net/http"
@@ -121,7 +123,21 @@ func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
         dst, err := net.Dial("tcp", dstAddr)
 
         if err == nil {
-            dst.Write(buf[0:size])
+            body := ""
+            rsp := &http.Response {
+                Status:        "200 OK",
+                StatusCode:    200,
+                Proto:         "HTTP/1.1",
+                ProtoMajor:    1,
+                ProtoMinor:    1,
+                Body:          ioutil.NopCloser(bytes.NewBufferString(body)),
+                ContentLength: int64(len(body)),
+                Request:       nil,
+                Header:        make(http.Header, 0),
+            }
+            buff := bytes.NewBuffer(nil)
+            rsp.Write(buff)
+            src.Write(buff.Bytes())
             startDetour(id, src, dst, bandwidth, bufferSize)
         } else {
             src.Close()
