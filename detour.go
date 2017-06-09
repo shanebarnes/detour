@@ -10,6 +10,7 @@ import (
     "log"
     "net"
     "net/http"
+    "net/url"
     "os"
     "os/signal"
     "strings"
@@ -94,9 +95,9 @@ func intercept(route Route) {
             if err == nil {
                 count = count + 1
 
-                if route.Inspect {
+                if route.Inspect { // Proxy mode
                     go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize)
-                } else {
+                } else { // Load balancer mode
                     // Round-robin for now
                     go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize)
                     i = (i + 1) % len(route.Dst)
@@ -111,18 +112,46 @@ func intercept(route Route) {
     }
 }
 
+func parseHttpRequestUri(header *http.Request) string {
+    var uri string
+    if header.Method == "HEAD" || header.Method == "PUT" {
+        url, err := url.Parse(header.RequestURI)
+
+        if err == nil {
+            if strings.ContainsAny(url.Host, ":") {
+                uri = url.Host
+            } else {
+                switch url.Scheme {
+                    case "http":
+                        uri = url.Host + ":80"
+                    case "https":
+                        uri = url.Host + ":443"
+                    default:
+                        uri = url.Host
+                }
+            }
+        } else {
+            log.Println(err.Error())
+        }
+    } else if header.Method == "CONNECT" {
+        uri = header.RequestURI
+    }
+
+    return uri
+}
+
 func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
-    buf := make([]byte, 16384)
+    buf := make([]byte, 65536)
     size, err := src.Read(buf) // Assume one read will include entire HTTP header
 
     if err == nil {
         reader := bufio.NewReader(strings.NewReader(string(buf[0:size])))
         header, _ := http.ReadRequest(reader)
-        dstAddr := header.RequestURI
 
+        dstAddr := parseHttpRequestUri(header)
         dst, err := net.Dial("tcp", dstAddr)
 
-        if err == nil {
+        if err == nil && header.Method == "CONNECT" {
             body := ""
             rsp := &http.Response {
                 Status:        "200 OK",
