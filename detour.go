@@ -8,11 +8,13 @@ import (
     "fmt"
     "io/ioutil"
     "log"
+    "metrics"
     "net"
     "net/http"
     "net/url"
     "os"
     "os/signal"
+    "strconv"
     "strings"
     "sync"
     "syscall"
@@ -21,6 +23,7 @@ import (
 )
 
 const _VERSION string = "0.2.0"
+var _logger *log.Logger = log.New(os.Stdout, "", 0)
 
 type Route struct {
     Bandwidth int64 `json:"bandwidth"`    // Bits per second
@@ -94,12 +97,12 @@ func intercept(route Route) {
             con, err := listener.Accept()
             if err == nil {
                 count = count + 1
-
+                m := metrics.New(_logger, 1000000000, strconv.Itoa(count) + ",tx")
                 if route.Inspect { // Proxy mode
-                    go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize)
+                    go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize, m)
                 } else { // Load balancer mode
                     // Round-robin for now
-                    go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize)
+                    go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize, m)
                     i = (i + 1) % len(route.Dst)
                 }
             } else {
@@ -140,7 +143,7 @@ func parseHttpRequestUri(header *http.Request) string {
     return uri
 }
 
-func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
+func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
     buf := make([]byte, 65536)
     size, err := src.Read(buf) // Assume one read will include entire HTTP header
 
@@ -171,7 +174,7 @@ func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
             } else {
                 dst.Write(buf[0:size])
             }
-            startDetour(id, src, dst, bandwidth, bufferSize)
+            startDetour(id, src, dst, bandwidth, bufferSize, m)
         } else {
             src.Close()
             log.Println(err.Error())
@@ -182,30 +185,30 @@ func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64) {
     }
 }
 
-func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64) {
+func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
     dst, err := net.Dial("tcp", dstAddr)
 
     if err == nil {
-        startDetour(id, src, dst, bandwidth, bufferSize)
+        startDetour(id, src, dst, bandwidth, bufferSize, m)
     } else {
         src.Close()
         log.Println(err.Error())
     }
 }
 
-func startDetour(id int, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64) {
+func startDetour(id int, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
     log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
     var wg sync.WaitGroup
     wg.Add(1)
-    go reroute(&wg, src, dst, bandwidth, bufferSize)
-    reroute(nil, dst, src, bandwidth, bufferSize)
+    go reroute(&wg, src, dst, bandwidth, bufferSize, m)
+    reroute(nil, dst, src, bandwidth, bufferSize, metrics.New(_logger, 1000000000, strconv.Itoa(id) + ",rx"))
     wg.Wait()
 
     log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
-func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64) {
+func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
     tb := tokenbucket.New(uint64(bandwidth), 10 * uint64(bandwidth))
     buf := make([]byte, bufferSize)
     defer src.Close()
@@ -221,6 +224,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bu
 
         size, err := src.Read(buf)
         if err == nil {
+            m.Add(int64(size))
             dst.Write(buf[0:size])
             if size < int(bufferSize) {
                 tb.Return(bufferSize - uint64(size))
@@ -229,6 +233,8 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bu
             break
         }
     }
+
+    m.Dump()
 
     if wg != nil {
         wg.Done()
