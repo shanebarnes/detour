@@ -117,7 +117,9 @@ func intercept(route Route) {
 
 func parseHttpRequestUri(header *http.Request) string {
     var uri string
-    if header.Method == "HEAD" || header.Method == "PUT" {
+    if header.Method == "CONNECT" {
+        uri = header.RequestURI
+    } else {
         url, err := url.Parse(header.RequestURI)
 
         if err == nil {
@@ -136,8 +138,6 @@ func parseHttpRequestUri(header *http.Request) string {
         } else {
             log.Println(err.Error())
         }
-    } else if header.Method == "CONNECT" {
-        uri = header.RequestURI
     }
 
     return uri
