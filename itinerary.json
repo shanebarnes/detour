@@ -11,10 +11,9 @@
             "bandwidth": 100000000,
             "buffersize": 131072,
             "inspect": false,
+            "guide": "https://loadbalancer/hostinfo hi_field dst_port",
             "src": "localhost:5001",
-            "dst": [
-                "localhost:5002"
-            ]
+            "dst": []
         },
         "no-limit": {
             "bandwidth": -1,

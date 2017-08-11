@@ -4,6 +4,7 @@ import (
     "bufio"
     "bytes"
     "encoding/json"
+    "errors"
     "flag"
     "fmt"
     "io/ioutil"
@@ -22,13 +23,14 @@ import (
     "tokenbucket"
 )
 
-const _VERSION string = "0.2.0"
+const _VERSION string = "0.3.0"
 var _logger *log.Logger = log.New(os.Stdout, "", 0)
 
 type Route struct {
     Bandwidth int64 `json:"bandwidth"`    // Bits per second
     Buffersize uint64 `json:"buffersize"` // Bytes
     Inspect bool `json:"inspect"`         // True = proxy, false = reverse proxy
+    Guide string `json:"guide"`           // HTTP(S) probe to query a load balancer for backend addresses, response field name containing IP address, and static destination port
     Src string `json:"src"`
     Dst []string `json:"dst"`
 }
@@ -54,6 +56,8 @@ func main() {
                   syscall.SIGSEGV,
                   syscall.SIGTERM)
 
+    go sigHandler(&sigs)
+
     log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
     itineraryFile := flag.String("itinerary", "itinerary.json", "file containing source and destination routes")
@@ -66,11 +70,14 @@ func main() {
 
     itinerary := loadItinerary(itineraryFile)
 
+    var wg sync.WaitGroup
+    wg.Add(len(itinerary.Map))
+
     for _, m := range itinerary.Map {
-        go intercept(m)
+        go intercept(&wg, m)
     }
 
-    sigHandler(&sigs)
+    wg.Wait()
 }
 
 func loadItinerary(fileName *string) Itinerary {
@@ -83,10 +90,98 @@ func loadItinerary(fileName *string) Itinerary {
         log.Println(err.Error())
     }
 
+    log.Println("Asking guides for directions")
+
+    var wg sync.WaitGroup
+    wg.Add(len(itinerary.Map))
+
+    for i, m := range itinerary.Map {
+        if len(m.Guide) > 0 {
+            var uri, key string
+            var port int
+            args, _ := fmt.Sscanf(m.Guide, "%s %s %d", &uri, &key, &port)
+
+            if args >= 2 {
+                findDestinations(&wg, &m, uri, key, port)
+                itinerary.Map[i] = m
+            } else {
+                wg.Done()
+            }
+        } else {
+            wg.Done()
+        }
+    }
+
+    wg.Wait()
+
+    log.Printf("Finished asking guides for directions")
+
     return itinerary
 }
 
-func intercept(route Route) {
+func findDestinations(wg *sync.WaitGroup, route *Route, guide, key string, port int) {
+    const TimeToLive = 10
+    ask := TimeToLive
+    count := 0
+
+    for ask > 0 {
+        if dst, err := askGuide(guide, key); err == nil {
+            found := false
+            for _, v := range route.Dst {
+                if v == (dst + ":" + strconv.Itoa(port)) {
+                    found = true
+                    ask = ask - 1
+                    break
+                }
+            }
+
+            if !found {
+                route.Dst = append(route.Dst, dst + ":" + strconv.Itoa(port))
+                count = count + 1
+                ask = TimeToLive
+                log.Println(guide + ": found " + dst)
+            } else {
+                time.Sleep(250 * time.Millisecond)
+            }
+        } else {
+            ask = ask - 1
+        }
+    }
+
+    log.Printf("%s: found %d destinations\n", guide, count)
+    wg.Done()
+}
+
+func askGuide(guide, key string) (string, error) {
+    var dir string = ""
+    tp := &http.Transport{ DisableKeepAlives: true, }
+    client := &http.Client{ Transport: tp, Timeout: 4 * time.Second }
+    r, err := client.Get(guide)
+
+    if err == nil {
+        if r.StatusCode == 200 {
+            var dat map[string]interface{}
+            body, _ := ioutil.ReadAll(r.Body)
+            json.Unmarshal([]byte(string(body)), &dat)
+
+            if val, ok := dat[key]; ok {
+                if dst, ok := val.(string); ok {
+                    dir = dst
+                }
+            }
+        }
+
+        r.Body.Close()
+    }
+
+    if len(dir) == 0 {
+        err = errors.New("'" + key + "' key does not exist")
+    }
+
+    return dir, err
+}
+
+func intercept(wg *sync.WaitGroup, route Route) {
     listener, err := net.Listen("tcp", route.Src)
     if err == nil {
         log.Println("Listening on", route.Src)
@@ -94,16 +189,14 @@ func intercept(route Route) {
         count := 0
 
         for {
-            con, err := listener.Accept()
-            if err == nil {
+            if con, err := listener.Accept(); err == nil {
                 count = count + 1
                 m := metrics.New(_logger, 1000000000, strconv.Itoa(count) + ",tx")
                 if route.Inspect { // Proxy mode
                     go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize, m)
-                } else { // Load balancer mode
-                    // Round-robin for now
+                } else if len(route.Dst) > 0 { // Load balancer mode
                     go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize, m)
-                    i = (i + 1) % len(route.Dst)
+                    i = (i + 1) % len(route.Dst) // Round-robin for now
                 }
             } else {
                 log.Println(err.Error())
@@ -113,6 +206,8 @@ func intercept(route Route) {
     } else {
         log.Println(err.Error())
     }
+
+    wg.Done()
 }
 
 func parseHttpRequestUri(header *http.Request) string {
