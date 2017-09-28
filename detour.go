@@ -193,9 +193,9 @@ func intercept(wg *sync.WaitGroup, route Route) {
                 count = count + 1
                 m := metrics.New(_logger, 1000000000, strconv.Itoa(count) + ",tx")
                 if route.Inspect { // Proxy mode
-                    go findHttpRoute(count, con, route.Bandwidth / 8, route.Buffersize, m)
+                    go findHttpRoute(count, con, &route, m)
                 } else if len(route.Dst) > 0 { // Load balancer mode
-                    go findRoute(count, con, route.Dst[i], route.Bandwidth / 8, route.Buffersize, m)
+                    go findRoute(count, con, route.Dst[i], &route, m)
                     i = (i + 1) % len(route.Dst) // Round-robin for now
                 }
             } else {
@@ -238,19 +238,22 @@ func parseHttpRequestUri(header *http.Request) string {
     return uri
 }
 
-func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
+func findHttpRoute(id int, src net.Conn, route *Route, m *metrics.Metrics) {
     buf := make([]byte, 65536)
     size, err := src.Read(buf) // Assume one read will include entire HTTP header
 
     if err == nil {
         reader := bufio.NewReader(strings.NewReader(string(buf[0:size])))
-        header, _ := http.ReadRequest(reader)
+        request, _ := http.ReadRequest(reader)
 
-        dstAddr := parseHttpRequestUri(header)
+        dstAddr := parseHttpRequestUri(request)
         dst, err := net.Dial("tcp", dstAddr)
 
+        log.Println(request)
+        log.Printf("[REQUEST] Content Length: %d\n", request.ContentLength)
+
         if err == nil {
-            if header.Method == "CONNECT" {
+            if request.Method == "CONNECT" {
                 body := ""
                 rsp := &http.Response {
                     Status:        "200 OK",
@@ -269,7 +272,7 @@ func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64, m *
             } else {
                 dst.Write(buf[0:size])
             }
-            startDetour(id, src, dst, bandwidth, bufferSize, m)
+            startDetour(id, src, dst, route, m)
         } else {
             src.Close()
             log.Println(err.Error())
@@ -280,30 +283,35 @@ func findHttpRoute(id int, src net.Conn, bandwidth int64, bufferSize uint64, m *
     }
 }
 
-func findRoute(id int, src net.Conn, dstAddr string, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
+func findRoute(id int, src net.Conn, dstAddr string, route *Route, m *metrics.Metrics) {
     dst, err := net.Dial("tcp", dstAddr)
 
     if err == nil {
-        startDetour(id, src, dst, bandwidth, bufferSize, m)
+        startDetour(id, src, dst, route, m)
     } else {
         src.Close()
         log.Println(err.Error())
     }
 }
 
-func startDetour(id int, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
+func startDetour(id int, src net.Conn, dst net.Conn, route *Route, m *metrics.Metrics) {
     log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
     var wg sync.WaitGroup
     wg.Add(1)
-    go reroute(&wg, src, dst, bandwidth, bufferSize, m)
-    reroute(nil, dst, src, bandwidth, bufferSize, metrics.New(_logger, 1000000000, strconv.Itoa(id) + ",rx"))
+    go reroute(&wg, src, dst, route, m)
+    reroute(nil, dst, src, route, metrics.New(_logger, 1000000000, strconv.Itoa(id) + ",rx"))
     wg.Wait()
 
     log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
-func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bufferSize uint64, m *metrics.Metrics) {
+func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *metrics.Metrics) {
+    bandwidth := route.Bandwidth / 8
+    bufferSize := route.Buffersize
+    var contentLength int64 = 0
+    direction := ""
+
     tb := tokenbucket.New(uint64(bandwidth), 10 * uint64(bandwidth))
     buf := make([]byte, bufferSize)
     defer src.Close()
@@ -318,8 +326,28 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bu
         }
 
         size, err := src.Read(buf)
+
         if err == nil {
-            m.Add(int64(size))
+            if route.Inspect == true  {
+                if contentLength == 0 {
+                    if r := getHttpRequest(string(buf[0:size])); r != nil {
+                        contentLength = r.ContentLength
+                        direction = "[REQUEST]"
+                        log.Println(r)
+                        log.Printf("%s Content Length: %d\n", direction, contentLength)
+                    } else if r := getHttpResponse(string(buf[0:size])); r != nil {
+                        contentLength = r.ContentLength
+                        direction = "[RESPONSE]"
+                        log.Println(r)
+                        log.Printf("%s Content Length: %d\n", direction, contentLength)
+                    }
+                } else {
+                    contentLength = contentLength - int64(size)
+                    //log.Println("%s Content Length: %d (bytes read %d)\n", direction, contentLength, size)
+                }
+            }
+
+            //m.Add(int64(size))
             dst.Write(buf[0:size])
             if size < int(bufferSize) {
                 tb.Return(bufferSize - uint64(size))
@@ -329,9 +357,33 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, bandwidth int64, bu
         }
     }
 
-    m.Dump()
+    //m.Dump()
 
     if wg != nil {
         wg.Done()
     }
+}
+
+func getHttpRequest(request string) *http.Request {
+    var req *http.Request = nil
+
+    reader := bufio.NewReader(strings.NewReader(request))
+
+    if r, err := http.ReadRequest(reader); err == nil {
+        req = r
+    }
+
+    return req
+}
+
+func getHttpResponse(response string) *http.Response {
+    var resp *http.Response = nil
+
+    reader := bufio.NewReader(strings.NewReader(response))
+
+    if r, err := http.ReadResponse(reader, nil); err == nil {
+        resp = r
+    }
+
+    return resp
 }
