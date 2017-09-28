@@ -1,26 +1,23 @@
 package main
 
 import (
-    "bufio"
-    "bytes"
     "encoding/json"
     "errors"
     "flag"
     "fmt"
     "io/ioutil"
     "log"
-    "metrics"
     "net"
     "net/http"
-    "net/url"
     "os"
     "os/signal"
     "strconv"
-    "strings"
     "sync"
     "syscall"
     "time"
-    "tokenbucket"
+
+    "github.com/shanebarnes/metrics"
+    "github.com/shanebarnes/tokenbucket"
 )
 
 const _VERSION string = "0.3.0"
@@ -58,7 +55,7 @@ func main() {
 
     go sigHandler(&sigs)
 
-    log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
     itineraryFile := flag.String("itinerary", "itinerary.json", "file containing source and destination routes")
     flag.Usage = func() {
@@ -193,7 +190,11 @@ func intercept(wg *sync.WaitGroup, route Route) {
                 count = count + 1
                 m := metrics.New(_logger, 1000000000, strconv.Itoa(count) + ",tx")
                 if route.Inspect { // Proxy mode
-                    go findHttpRoute(count, con, &route, m)
+                    // Map allocation and route finding should also be in thread
+                    httpMap := new(MapHttp)
+                    if dst, err := httpMap.FindRoute(con); err == nil {
+                        go startDetour(count, con, dst, &route, m)
+                    }
                 } else if len(route.Dst) > 0 { // Load balancer mode
                     go findRoute(count, con, route.Dst[i], &route, m)
                     i = (i + 1) % len(route.Dst) // Round-robin for now
@@ -208,79 +209,6 @@ func intercept(wg *sync.WaitGroup, route Route) {
     }
 
     wg.Done()
-}
-
-func parseHttpRequestUri(header *http.Request) string {
-    var uri string
-    if header.Method == "CONNECT" {
-        uri = header.RequestURI
-    } else {
-        url, err := url.Parse(header.RequestURI)
-
-        if err == nil {
-            if strings.ContainsAny(url.Host, ":") {
-                uri = url.Host
-            } else {
-                switch url.Scheme {
-                    case "http":
-                        uri = url.Host + ":80"
-                    case "https":
-                        uri = url.Host + ":443"
-                    default:
-                        uri = url.Host
-                }
-            }
-        } else {
-            log.Println(err.Error())
-        }
-    }
-
-    return uri
-}
-
-func findHttpRoute(id int, src net.Conn, route *Route, m *metrics.Metrics) {
-    buf := make([]byte, 65536)
-    size, err := src.Read(buf) // Assume one read will include entire HTTP header
-
-    if err == nil {
-        reader := bufio.NewReader(strings.NewReader(string(buf[0:size])))
-        request, _ := http.ReadRequest(reader)
-
-        dstAddr := parseHttpRequestUri(request)
-        dst, err := net.Dial("tcp", dstAddr)
-
-        log.Println(request)
-        log.Printf("[REQUEST] Content Length: %d\n", request.ContentLength)
-
-        if err == nil {
-            if request.Method == "CONNECT" {
-                body := ""
-                rsp := &http.Response {
-                    Status:        "200 OK",
-                    StatusCode:    200,
-                    Proto:         "HTTP/1.1",
-                    ProtoMajor:    1,
-                    ProtoMinor:    1,
-                    Body:          ioutil.NopCloser(bytes.NewBufferString(body)),
-                    ContentLength: int64(len(body)),
-                    Request:       nil,
-                    Header:        make(http.Header, 0),
-                }
-                rspBuf := bytes.NewBuffer(nil)
-                rsp.Write(rspBuf)
-                src.Write(rspBuf.Bytes())
-            } else {
-                dst.Write(buf[0:size])
-            }
-            startDetour(id, src, dst, route, m)
-        } else {
-            src.Close()
-            log.Println(err.Error())
-        }
-    } else {
-        src.Close()
-        log.Println(err.Error())
-    }
 }
 
 func findRoute(id int, src net.Conn, dstAddr string, route *Route, m *metrics.Metrics) {
@@ -309,8 +237,6 @@ func startDetour(id int, src net.Conn, dst net.Conn, route *Route, m *metrics.Me
 func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *metrics.Metrics) {
     bandwidth := route.Bandwidth / 8
     bufferSize := route.Buffersize
-    var contentLength int64 = 0
-    direction := ""
 
     tb := tokenbucket.New(uint64(bandwidth), 10 * uint64(bandwidth))
     buf := make([]byte, bufferSize)
@@ -329,22 +255,6 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *me
 
         if err == nil {
             if route.Inspect == true  {
-                if contentLength == 0 {
-                    if r := getHttpRequest(string(buf[0:size])); r != nil {
-                        contentLength = r.ContentLength
-                        direction = "[REQUEST]"
-                        log.Println(r)
-                        log.Printf("%s Content Length: %d\n", direction, contentLength)
-                    } else if r := getHttpResponse(string(buf[0:size])); r != nil {
-                        contentLength = r.ContentLength
-                        direction = "[RESPONSE]"
-                        log.Println(r)
-                        log.Printf("%s Content Length: %d\n", direction, contentLength)
-                    }
-                } else {
-                    contentLength = contentLength - int64(size)
-                    //log.Println("%s Content Length: %d (bytes read %d)\n", direction, contentLength, size)
-                }
             }
 
             //m.Add(int64(size))
@@ -362,28 +272,4 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *me
     if wg != nil {
         wg.Done()
     }
-}
-
-func getHttpRequest(request string) *http.Request {
-    var req *http.Request = nil
-
-    reader := bufio.NewReader(strings.NewReader(request))
-
-    if r, err := http.ReadRequest(reader); err == nil {
-        req = r
-    }
-
-    return req
-}
-
-func getHttpResponse(response string) *http.Response {
-    var resp *http.Response = nil
-
-    reader := bufio.NewReader(strings.NewReader(response))
-
-    if r, err := http.ReadResponse(reader, nil); err == nil {
-        resp = r
-    }
-
-    return resp
 }
