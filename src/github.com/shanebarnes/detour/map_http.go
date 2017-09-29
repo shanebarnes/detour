@@ -33,8 +33,14 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
         dst, err := net.Dial("tcp", dstAddr)
 
         m.Role = roleClient
+
+        if strings.HasPrefix(request.UserAgent(), "AzCopy") {
+            m.Impl.Shortcut = new(ShortcutAzureBlob)
+            _logger.Println("Detected AzCopy client")
+        }
+
         _logger.Println(request)
-        _logger.Printf("[REQUEST] Content Length: %d\n", request.ContentLength)
+        _logger.Printf("%s Content Length: %d\n", m.Role, request.ContentLength)
 
         if err == nil {
             if request.Method == "CONNECT" {
@@ -57,19 +63,19 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
                 dst.Write(buf[0:size])
             }
 
+            m.Impl.Destination = dst
             res = dst
         }
-    }
-
-    if err != nil {
-        src.Close()
-        _logger.Println(err.Error())
     }
 
     return res, err
 }
 
-func (m *MapHttp) Inspect(buffer []byte) {
+func (m *MapHttp) Detour(buffer []byte) {
+    if m.Impl.Shortcut != nil {
+        m.Impl.Shortcut.Take(m.Impl.Destination, buffer)
+    }
+
     if m.ContentLength == 0 {
         payload := string(buffer)
         if r := getHttpRequest(&payload); r != nil {
@@ -87,10 +93,16 @@ func (m *MapHttp) Inspect(buffer []byte) {
         m.ContentLength = m.ContentLength - int64(len(buffer))
         //_logger.Println("%s Content Length: %d (bytes read %d)\n", direction, contentLength, size)
     }
+
+    m.Impl.Destination.Write(buffer)
 }
 
 func (m *MapHttp) GetImpl() *MapImpl {
     return &m.Impl
+}
+
+func (m *MapHttp) GetRouteCount() int {
+    return m.Impl.GetRouteCount()
 }
 
 func parseHttpRequestUri(header *http.Request) string {

@@ -16,8 +16,7 @@ import (
     "syscall"
     "time"
 
-    "github.com/shanebarnes/metrics"
-    "github.com/shanebarnes/tokenbucket"
+    "github.com/shanebarnes/detour/tokenbucket"
 )
 
 const _VERSION string = "0.3.0"
@@ -182,23 +181,11 @@ func intercept(wg *sync.WaitGroup, route Route) {
     listener, err := net.Listen("tcp", route.Src)
     if err == nil {
         log.Println("Listening on", route.Src)
-        i := 0
-        count := 0
-
+        routeCount := 0
         for {
             if con, err := listener.Accept(); err == nil {
-                count = count + 1
-                m := metrics.New(_logger, 1000000000, strconv.Itoa(count) + ",tx")
-                if route.Inspect { // Proxy mode
-                    // Map allocation and route finding should also be in thread
-                    httpMap := new(MapHttp)
-                    if dst, err := httpMap.FindRoute(con); err == nil {
-                        go startDetour(count, con, dst, &route, m)
-                    }
-                } else if len(route.Dst) > 0 { // Load balancer mode
-                    go findRoute(count, con, route.Dst[i], &route, m)
-                    i = (i + 1) % len(route.Dst) // Round-robin for now
-                }
+                go findRoute(con, &route, routeCount)
+                routeCount = routeCount + 1
             } else {
                 log.Println(err.Error())
             }
@@ -211,30 +198,46 @@ func intercept(wg *sync.WaitGroup, route Route) {
     wg.Done()
 }
 
-func findRoute(id int, src net.Conn, dstAddr string, route *Route, m *metrics.Metrics) {
-    dst, err := net.Dial("tcp", dstAddr)
+func findRoute(src net.Conn, route *Route, routeCount int) error {
+    var res error = nil
+    var mp Map = nil
 
-    if err == nil {
-        startDetour(id, src, dst, route, m)
+    if route.Inspect { // Proxy mode
+        mp = new(MapHttp)
+    } else if len(route.Dst) > 0 { // Load balancer mode
+        mpTcp := new(MapTcp)
+        mpTcp.Destinations = route.Dst
+        mp = mpTcp
+    }
+
+    if mp != nil {
+        mp.GetImpl().RouteCount = routeCount
+        if dst, err := mp.FindRoute(src); err == nil {
+            startDetour(mp.GetRouteCount(), src, dst, route, mp)
+        } else {
+            src.Close()
+            _logger.Println(err.Error())
+        }
     } else {
         src.Close()
-        log.Println(err.Error())
     }
+
+    return res
 }
 
-func startDetour(id int, src net.Conn, dst net.Conn, route *Route, m *metrics.Metrics) {
+func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
     log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
     var wg sync.WaitGroup
     wg.Add(1)
-    go reroute(&wg, src, dst, route, m)
-    reroute(nil, dst, src, route, metrics.New(_logger, 1000000000, strconv.Itoa(id) + ",rx"))
+    go reroute(&wg, src, dst, route, mp)
+    reroute(nil, dst, src, route, mp)
     wg.Wait()
 
     log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
-func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *metrics.Metrics) {
+func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, mp Map) {
     bandwidth := route.Bandwidth / 8
     bufferSize := route.Buffersize
 
@@ -254,11 +257,8 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *me
         size, err := src.Read(buf)
 
         if err == nil {
-            if route.Inspect == true  {
-            }
+            mp.Detour(buf[0:size])
 
-            //m.Add(int64(size))
-            dst.Write(buf[0:size])
             if size < int(bufferSize) {
                 tb.Return(bufferSize - uint64(size))
             }
@@ -266,8 +266,6 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, m *me
             break
         }
     }
-
-    //m.Dump()
 
     if wg != nil {
         wg.Done()

@@ -26,6 +26,16 @@ cd "$GOPATH"
 mkdir -p "$GOBIN"
 cd "${GOPATH}/src/github.com/shanebarnes/detour"
 
+# E.g., linux
+if [ ! -z "${1}" ]; then
+    export GOOS="${1}"
+fi
+
+# E.g., amd64
+if [ ! -z "${2}" ]; then
+    export GOARCH="${2}"
+fi
+
 printf "Downloading and installing packages and dependencies...\n"
 
 if [ $cmd_glide -eq 0 ]; then
