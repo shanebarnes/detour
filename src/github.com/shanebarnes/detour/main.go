@@ -17,6 +17,7 @@ import (
     "time"
 
     "github.com/shanebarnes/detour/tokenbucket"
+    "github.com/twinj/uuid"
 )
 
 const _VERSION string = "0.3.0"
@@ -42,6 +43,9 @@ func sigHandler(ch *chan os.Signal) {
 }
 
 func main() {
+    // This may need to be done in a singleton
+    _ = uuid.Init()
+
     sigs := make(chan os.Signal, 1)
     signal.Notify(sigs,
                   syscall.SIGHUP,
@@ -54,7 +58,7 @@ func main() {
 
     go sigHandler(&sigs)
 
-    log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+    _logger.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 
     itineraryFile := flag.String("itinerary", "itinerary.json", "file containing source and destination routes")
     flag.Usage = func() {
@@ -83,10 +87,10 @@ func loadItinerary(fileName *string) Itinerary {
     itinerary := Itinerary{}
     err := decoder.Decode(&itinerary)
     if err != nil {
-        log.Println(err.Error())
+        _logger.Println(err.Error())
     }
 
-    log.Println("Asking guides for directions")
+    _logger.Println("Asking guides for directions")
 
     var wg sync.WaitGroup
     wg.Add(len(itinerary.Map))
@@ -110,7 +114,7 @@ func loadItinerary(fileName *string) Itinerary {
 
     wg.Wait()
 
-    log.Printf("Finished asking guides for directions")
+    _logger.Printf("Finished asking guides for directions")
 
     return itinerary
 }
@@ -135,23 +139,23 @@ func findDestinations(wg *sync.WaitGroup, route *Route, guide, key string, port 
                 route.Dst = append(route.Dst, dst + ":" + strconv.Itoa(port))
                 count = count + 1
                 ask = TimeToLive
-                log.Println(guide + ": found " + dst)
+                _logger.Println(guide + ": found " + dst)
             } else {
                 time.Sleep(250 * time.Millisecond)
             }
         } else {
-            ask = ask - 1
+            ask = 0
         }
     }
 
-    log.Printf("%s: found %d destinations\n", guide, count)
+    _logger.Printf("%s: found %d destinations\n", guide, count)
     wg.Done()
 }
 
 func askGuide(guide, key string) (string, error) {
     var dir string = ""
     tp := &http.Transport{ DisableKeepAlives: true, }
-    client := &http.Client{ Transport: tp, Timeout: 4 * time.Second }
+    client := &http.Client{ Transport: tp, Timeout: 2 * time.Second }
     r, err := client.Get(guide)
 
     if err == nil {
@@ -170,7 +174,7 @@ func askGuide(guide, key string) (string, error) {
         r.Body.Close()
     }
 
-    if len(dir) == 0 {
+    if err == nil && len(dir) == 0 {
         err = errors.New("'" + key + "' key does not exist")
     }
 
@@ -179,20 +183,23 @@ func askGuide(guide, key string) (string, error) {
 
 func intercept(wg *sync.WaitGroup, route Route) {
     listener, err := net.Listen("tcp", route.Src)
+    //listener.SetReadBuffer(4*1024*1024)
+    //listener.SetWriteBuffer(4*1024*1024)
+    // Add HTTP probe functions to a map class
     if err == nil {
-        log.Println("Listening on", route.Src)
+        _logger.Println("Listening on", route.Src)
         routeCount := 0
         for {
             if con, err := listener.Accept(); err == nil {
                 go findRoute(con, &route, routeCount)
                 routeCount = routeCount + 1
             } else {
-                log.Println(err.Error())
+                _logger.Println(err.Error())
             }
         }
         listener.Close()
     } else {
-        log.Println(err.Error())
+        _logger.Println(err.Error())
     }
 
     wg.Done()
@@ -211,9 +218,9 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
     }
 
     if mp != nil {
-        mp.GetImpl().RouteCount = routeCount
+        mp.GetImpl().RouteNumber = routeCount
         if dst, err := mp.FindRoute(src); err == nil {
-            startDetour(mp.GetRouteCount(), src, dst, route, mp)
+            startDetour(mp.GetRouteNumber(), src, dst, route, mp)
         } else {
             src.Close()
             _logger.Println(err.Error())
@@ -226,18 +233,19 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
 }
 
 func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
-    log.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+    _logger.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
     var wg sync.WaitGroup
     wg.Add(1)
-    go reroute(&wg, src, dst, route, mp)
-    reroute(nil, dst, src, route, mp)
+
+    go reroute(&wg, src, dst, Client, route, mp)
+    reroute(nil, dst, src, Server, route, mp)
     wg.Wait()
 
-    log.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+    _logger.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
-func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, mp Map) {
+func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *Route, mp Map) {
     bandwidth := route.Bandwidth / 8
     bufferSize := route.Buffersize
 
@@ -245,7 +253,10 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, mp Ma
     buf := make([]byte, bufferSize)
     defer src.Close()
     defer dst.Close()
-
+tag := "[CLIENT]"
+if role == Server {
+tag = "[SERVER]"
+}
     for {
         bytes := tb.Remove(bufferSize)
         if bytes < bufferSize {
@@ -257,7 +268,8 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, route *Route, mp Ma
         size, err := src.Read(buf)
 
         if err == nil {
-            mp.Detour(buf[0:size])
+_logger.Println(tag, "Read:", size)
+            mp.Detour(role, buf[:size])
 
             if size < int(bufferSize) {
                 tb.Return(bufferSize - uint64(size))

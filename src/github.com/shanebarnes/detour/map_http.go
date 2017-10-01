@@ -10,13 +10,8 @@ import (
     "strings"
 )
 
-const roleClient = "[CLIENT REQ]"
-const roleServer = "[CLIENT RSP]"
-
 type MapHttp struct {
-    Role          string
-    ContentLength int64
-    Impl          MapImpl
+    Impl MapImpl
 }
 
 func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
@@ -32,22 +27,21 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
         dstAddr := parseHttpRequestUri(request)
         dst, err := net.Dial("tcp", dstAddr)
 
-        m.Role = roleClient
-
         if strings.HasPrefix(request.UserAgent(), "AzCopy") {
             m.Impl.Shortcut = new(ShortcutAzureBlob)
             _logger.Println("Detected AzCopy client")
+        } else {
+            m.Impl.Shortcut = new(ShortcutNull)
         }
 
-        _logger.Println(request)
-        _logger.Printf("%s Content Length: %d\n", m.Role, request.ContentLength)
+        m.Impl.Shortcut.New(m.GetRouteNumber(), src, dst)
 
         if err == nil {
             if request.Method == "CONNECT" {
                 body := ""
                 rsp := &http.Response {
                     Status:        "200 OK",
-                    StatusCode:    200,
+                    StatusCode:    http.StatusOK,
                     Proto:         "HTTP/1.1",
                     ProtoMajor:    1,
                     ProtoMinor:    1,
@@ -60,10 +54,11 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
                 rsp.Write(rspBuf)
                 src.Write(rspBuf.Bytes())
             } else {
-                dst.Write(buf[0:size])
+                m.Impl.Shortcut.Take(Client, buf[:size])
             }
 
-            m.Impl.Destination = dst
+            m.Impl.Src = src
+            m.Impl.Dst = dst
             res = dst
         }
     }
@@ -71,38 +66,16 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
     return res, err
 }
 
-func (m *MapHttp) Detour(buffer []byte) {
-    if m.Impl.Shortcut != nil {
-        m.Impl.Shortcut.Take(m.Impl.Destination, buffer)
-    }
-
-    if m.ContentLength == 0 {
-        payload := string(buffer)
-        if r := getHttpRequest(&payload); r != nil {
-            m.ContentLength = r.ContentLength
-            m.Role = roleClient
-            _logger.Println(r)
-            _logger.Printf("%s Content Length: %d\n", m.Role, m.ContentLength)
-        } else if r := getHttpResponse(&payload); r != nil {
-            m.ContentLength = r.ContentLength
-            m.Role = roleServer
-            _logger.Println(r)
-            _logger.Printf("%s Content Length: %d\n", m.Role, m.ContentLength)
-        }
-    } else { // HTTP continuation
-        m.ContentLength = m.ContentLength - int64(len(buffer))
-        //_logger.Println("%s Content Length: %d (bytes read %d)\n", direction, contentLength, size)
-    }
-
-    m.Impl.Destination.Write(buffer)
+func (m *MapHttp) Detour(role Role, buffer []byte) {
+    m.Impl.Shortcut.Take(role, buffer)
 }
 
 func (m *MapHttp) GetImpl() *MapImpl {
     return &m.Impl
 }
 
-func (m *MapHttp) GetRouteCount() int {
-    return m.Impl.GetRouteCount()
+func (m *MapHttp) GetRouteNumber() int {
+    return m.Impl.GetRouteNumber()
 }
 
 func parseHttpRequestUri(header *http.Request) string {
@@ -133,7 +106,7 @@ func parseHttpRequestUri(header *http.Request) string {
     return uri
 }
 
-func getHttpRequest(request *string) *http.Request {
+func GetHttpRequest(request *string) *http.Request {
     var req *http.Request = nil
 
     reader := bufio.NewReader(strings.NewReader(*request))
@@ -145,7 +118,7 @@ func getHttpRequest(request *string) *http.Request {
     return req
 }
 
-func getHttpResponse(response *string) *http.Response {
+func GetHttpResponse(response *string) *http.Response {
     var rsp *http.Response = nil
 
     reader := bufio.NewReader(strings.NewReader(*response))
