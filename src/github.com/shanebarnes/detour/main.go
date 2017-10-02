@@ -253,10 +253,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
     buf := make([]byte, bufferSize)
     defer src.Close()
     defer dst.Close()
-tag := "[CLIENT]"
-if role == Server {
-tag = "[SERVER]"
-}
+
     for {
         bytes := tb.Remove(bufferSize)
         if bytes < bufferSize {
@@ -268,7 +265,6 @@ tag = "[SERVER]"
         size, err := src.Read(buf)
 
         if err == nil {
-_logger.Println(tag, "Read:", size)
             mp.Detour(role, buf[:size])
 
             if size < int(bufferSize) {

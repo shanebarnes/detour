@@ -101,10 +101,10 @@ func (s *ShortcutAzureBlob) isMilestoneRequest(role Role, buffer []byte) (bool, 
             foundRequest = true
 
             _logger.Println("\n\n", r, "\n\n")
-            _logger.Println(s.ctxt[role].tag, "Request Method: ", r.Method, " size: ", r.ContentLength)
+            _logger.Println(s.ctxt[role].tag, "Request Method:", r.Method, "Size:", r.ContentLength)
 
             // Ignore zero content lengths or content lengths of unknown size (-1)
-            if role == Client && r.ContentLength > 0 /*&& s.ctxt[role].method == "PUT"*/ {
+            if role == Client && r.Method == "PUT" && r.ContentLength > 0 /*&& s.ctxt[role].method == "PUT"*/ {
                 s.ctxt[role].contentLength = r.ContentLength
                 s.ctxt[role].method = r.Method
                 atomic.AddInt32(&s.ctxt[Client].requestCount, 1)
@@ -114,7 +114,7 @@ func (s *ShortcutAzureBlob) isMilestoneRequest(role Role, buffer []byte) (bool, 
                     if body, err := ioutil.ReadAll(r.Body); err == nil {
                         s.blockPushBack(role, len(s.ctxt[role].blockCache) - 1, body)
                         s.updateContentLeft(role, int64(len(body)))
-                        if s.ctxt[role].contentLength == 0 && s.ctxt[role].method == "PUT" {
+                        if s.ctxt[role].contentLength == 0 {
                             s.sendResponse(role, len(s.ctxt[role].blockCache) - 1)
                         }
                     }
@@ -148,7 +148,7 @@ func (s *ShortcutAzureBlob) isMilestoneResponse(role Role, buffer []byte) (bool,
         if r := GetHttpResponse(&payload); r != nil {
             foundResponse = true
             _logger.Println("\n\n", r, "\n\n")
-            _logger.Println(s.ctxt[role].tag, "Response Status: ", r.Status)
+            _logger.Println(s.ctxt[role].tag, "Response Status:", r.Status)
 
             if role == Server && r.StatusCode == http.StatusCreated {
                 if s.impl.use && atomic.LoadInt32(&s.ctxt[Client].requestCount) > 0 {
@@ -232,7 +232,6 @@ func (s *ShortcutAzureBlob) updateContentLeft(role Role, contentLength int64) { 
         s.ctxt[role].contentLength = 0
     } else {
         s.ctxt[role].contentLength = s.ctxt[role].contentLength - contentLength
-        _logger.Println(s.ctxt[role].tag, "Content length is now:", s.ctxt[role].contentLength)
     }
 }
 
