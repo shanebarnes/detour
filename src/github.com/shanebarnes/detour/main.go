@@ -20,7 +20,7 @@ import (
     "github.com/twinj/uuid"
 )
 
-const _VERSION string = "0.3.0"
+const _VERSION string = "0.4.0"
 var _logger *log.Logger = log.New(os.Stdout, "", 0)
 
 type Route struct {
