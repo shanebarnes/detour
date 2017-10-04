@@ -10,6 +10,8 @@ import (
     "strings"
 )
 
+const eom string = "\r\n\r\n"
+
 type MapHttp struct {
     Impl MapImpl
 }
@@ -29,7 +31,7 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
 
         if strings.HasPrefix(request.UserAgent(), "AzCopy") {
             m.Impl.Shortcut = new(ShortcutAzureBlob)
-            _logger.Println("Detected AzCopy client")
+            _logger.Println("{", m.GetRouteNumber(), "}", "Found AzCopy shortcut")
         } else {
             m.Impl.Shortcut = new(ShortcutNull)
         }
@@ -106,26 +108,30 @@ func parseHttpRequestUri(header *http.Request) string {
     return uri
 }
 
-func GetHttpRequest(request *string) *http.Request {
+func GetHttpRequest(request *string) (*http.Request, int) {
     var req *http.Request = nil
+    var n int = 0
 
     reader := bufio.NewReader(strings.NewReader(*request))
 
     if r, err := http.ReadRequest(reader); err == nil {
         req = r
+        n = strings.Index(*request, eom) + len(eom)
     }
 
-    return req
+    return req, n
 }
 
-func GetHttpResponse(response *string) *http.Response {
+func GetHttpResponse(response *string) (*http.Response, int) {
     var rsp *http.Response = nil
+    var n int = 0
 
     reader := bufio.NewReader(strings.NewReader(*response))
 
     if r, err := http.ReadResponse(reader, nil); err == nil {
         rsp = r
+        n = strings.Index(*response, eom) + len(eom)
     }
 
-    return rsp
+    return rsp, n
 }

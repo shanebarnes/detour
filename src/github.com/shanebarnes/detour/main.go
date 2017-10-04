@@ -182,9 +182,15 @@ func askGuide(guide, key string) (string, error) {
 }
 
 func intercept(wg *sync.WaitGroup, route Route) {
+    //ipAddr, err := net.ResolveIPAddr("ip4", route.Src)
+    //if sock, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, syscall.IPPROTO_TCP); err == nil {
+    //    syscall.SetsockoptInt(sock, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 4*1024*1024)
+    //    syscall.SetsockoptInt(sock, syscall.SOL_SOCKET, syscall.SO_SNDBUF, 4*1024*1024)
+    //    syscall.Bind(sock, ipAddr)
+    //}
+
     listener, err := net.Listen("tcp", route.Src)
-    //listener.SetReadBuffer(4*1024*1024)
-    //listener.SetWriteBuffer(4*1024*1024)
+
     // Add HTTP probe functions to a map class
     if err == nil {
         _logger.Println("Listening on", route.Src)
@@ -232,8 +238,19 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
     return res
 }
 
+func setTcpOptions(con net.Conn) {
+    //listener.SetReadBuffer(4*1024*1024)
+    //listener.SetWriteBuffer(4*1024*1024)
+    if tcpCon, ok := con.(*net.TCPConn); ok == true {
+        tcpCon.SetNoDelay(true)
+    }
+}
+
 func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
     _logger.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+
+    setTcpOptions(src)
+    setTcpOptions(dst)
 
     var wg sync.WaitGroup
     wg.Add(1)
