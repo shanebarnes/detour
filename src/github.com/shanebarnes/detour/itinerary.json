@@ -4,14 +4,14 @@
             "bandwidth": -1,
             "buffersize": 131072,
             "inspect": true,
-            "src": "localhost:8443",
+            "src": "127.0.0.1:8443",
             "dst": []
         },
         "100M-limit": {
             "bandwidth": 100000000,
             "buffersize": 131072,
             "inspect": false,
-            "guide": "https://loadbalancer/hostinfo hi_field dst_port",
+            "guide": "https://loadbalancer/hostinfo json_field dst_port",
             "src": "localhost:5001",
             "dst": []
         },
@@ -24,5 +24,12 @@
                 "localhost:5004"
             ]
         }
-    }
+    },
+    "shortcuts": [
+        {
+            "exitno": 1,
+            "shortcut": "shortcut_azure_blob",
+            "wormhole": true
+        }
+    ]
 }

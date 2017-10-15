@@ -16,7 +16,7 @@ type MapHttp struct {
     Impl MapImpl
 }
 
-func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
+func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
     var res net.Conn = nil
 
     buf := make([]byte, 65536)
@@ -29,14 +29,7 @@ func (m *MapHttp) FindRoute(src net.Conn) (net.Conn, error) {
         dstAddr := parseHttpRequestUri(request)
         dst, err := net.Dial("tcp", dstAddr)
 
-        if strings.HasPrefix(request.UserAgent(), "AzCopy") {
-            m.Impl.Shortcut = new(ShortcutAzureBlob)
-            _logger.Println("{", m.GetRouteNumber(), "}", "Found AzCopy shortcut")
-        } else {
-            m.Impl.Shortcut = new(ShortcutNull)
-        }
-
-        m.Impl.Shortcut.New(m.GetRouteNumber(), src, dst)
+        m.Impl.Shortcut = guide.FindShortcut(m.GetRouteNumber(), Client, request.UserAgent(), src, dst)
 
         if err == nil {
             if request.Method == "CONNECT" {

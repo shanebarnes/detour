@@ -21,7 +21,7 @@ type MapImpl struct {
 type Map interface {
     Detour(role Role, buffer []byte)
     GetImpl() *MapImpl
-    FindRoute(src net.Conn) (net.Conn, error)
+    FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error)
     GetRouteNumber() int
 }
 

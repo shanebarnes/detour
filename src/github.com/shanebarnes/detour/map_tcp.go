@@ -9,7 +9,7 @@ type MapTcp struct {
     Impl           MapImpl
 }
 
-func (m *MapTcp) FindRoute(src net.Conn) (net.Conn, error) {
+func (m *MapTcp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
     i := m.Impl.RouteNumber % len(m.Destinations) // Round-robin for now
 
     dst, err := net.Dial("tcp", m.Destinations[i])

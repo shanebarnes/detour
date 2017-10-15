@@ -16,24 +16,34 @@ import (
     "syscall"
     "time"
 
+    "github.com/shanebarnes/detour/metrics"
     "github.com/shanebarnes/detour/tokenbucket"
     "github.com/twinj/uuid"
 )
 
-const _VERSION string = "0.4.0"
+const _VERSION string = "0.5.0"
+var _guide GuideImpl
 var _logger *log.Logger = log.New(os.Stdout, "", 0)
 
+type FastRoute struct {
+    Exitno   int64 `json:"exitno"`    // The number of exits until the shortcut
+    Shortcut string `json:"shortcut"` // Application protocol proxy
+    Wormhole bool   `json:"wormhole"` // Application protocol emulation
+}
+
 type Route struct {
-    Bandwidth int64 `json:"bandwidth"`    // Bits per second
-    Buffersize uint64 `json:"buffersize"` // Bytes
+    Bandwidth int64 `json:"bandwidth"`    // Bits per second (max travel speed)
+    Buffersize uint64 `json:"buffersize"` // Bytes (max passengers)
+    Delay int64 `json:"delay"`            // Milliseconds (travel delay)
     Inspect bool `json:"inspect"`         // True = proxy, false = reverse proxy
     Guide string `json:"guide"`           // HTTP(S) probe to query a load balancer for backend addresses, response field name containing IP address, and static destination port
-    Src string `json:"src"`
-    Dst []string `json:"dst"`
+    Src string `json:"src"`               // Source/Point of Departure
+    Dst []string `json:"dst"`             // Destinations
 }
 
 type Itinerary struct {
-    Map map[string]Route
+    Map       map[string]Route `json:"map"`
+    Shortcuts []FastRoute      `json:"shortcuts"`
 }
 
 func sigHandler(ch *chan os.Signal) {
@@ -81,7 +91,6 @@ func main() {
 }
 
 func loadItinerary(fileName *string) Itinerary {
-
     file, _ := os.Open(*fileName)
     decoder := json.NewDecoder(file)
     itinerary := Itinerary{}
@@ -89,6 +98,8 @@ func loadItinerary(fileName *string) Itinerary {
     if err != nil {
         _logger.Println(err.Error())
     }
+
+    _guide.LoadShortcuts(itinerary.Shortcuts)
 
     _logger.Println("Asking guides for directions")
 
@@ -225,7 +236,7 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
 
     if mp != nil {
         mp.GetImpl().RouteNumber = routeCount
-        if dst, err := mp.FindRoute(src); err == nil {
+        if dst, err := mp.FindRoute(_guide, src); err == nil {
             startDetour(mp.GetRouteNumber(), src, dst, route, mp)
         } else {
             src.Close()
@@ -244,10 +255,25 @@ func setTcpOptions(con net.Conn) {
     if tcpCon, ok := con.(*net.TCPConn); ok == true {
         tcpCon.SetNoDelay(true)
     }
+//t, _ := con.(*net.TCPConn)
+//ptrVal := reflect.ValueOf(t)
+//val := reflect.Indirect(ptrVal)
+//val1conn := val.FieldByName("conn")
+//    val2 := reflect.Indirect(val1conn)
+
+//    // which is a net.conn from which we get the 'fd' field
+//    fdmember := val2.FieldByName("fd")
+//    val3 := reflect.Indirect(fdmember)
+
+//    // which is a netFD from which we get the 'sysfd' field
+//    netFdPtr := val3.FieldByName("sysfd")
+//    fmt.Printf("netFDPtr= %v\n", netFdPtr)
+    //EnableTcpFastPath(t)
+
 }
 
 func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
-    _logger.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+//    _logger.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
     setTcpOptions(src)
     setTcpOptions(dst)
@@ -259,13 +285,21 @@ func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
     reroute(nil, dst, src, Server, route, mp)
     wg.Wait()
 
-    _logger.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+//    _logger.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
 func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *Route, mp Map) {
     bandwidth := route.Bandwidth / 8
     bufferSize := route.Buffersize
 
+    tag := ""
+    switch role {
+    case Client:
+        tag = "CLIENT-" + strconv.Itoa(mp.GetRouteNumber())
+    case Server:
+        tag = "SERVER-" + strconv.Itoa(mp.GetRouteNumber())
+    }
+    metrics := metrics.New(_logger, 1000*1000*1000*1000, -1, tag)
     tb := tokenbucket.New(uint64(bandwidth), 10 * uint64(bandwidth))
     buf := make([]byte, bufferSize)
     defer src.Close()
@@ -283,6 +317,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 
         if err == nil {
             mp.Detour(role, buf[:size])
+            metrics.Add(int64(size))
 
             if size < int(bufferSize) {
                 tb.Return(bufferSize - uint64(size))
@@ -291,6 +326,8 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
             break
         }
     }
+
+//    metrics.Dump()
 
     if wg != nil {
         wg.Done()

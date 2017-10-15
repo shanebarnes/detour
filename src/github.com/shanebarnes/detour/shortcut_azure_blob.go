@@ -16,6 +16,15 @@ import (
 
 const azcopyBlockSize int64 = 4 * 1024 * 1024
 
+var azcopyBlocksSupported = [...]int64 {
+    azcopyBlockSize * 1,
+    azcopyBlockSize * 2,
+    azcopyBlockSize * 4,
+    azcopyBlockSize * 8,
+    azcopyBlockSize * 16,
+    azcopyBlockSize * 25,
+}
+
 type CacheEntry struct {
     block         []byte
     contentLength   int64
@@ -25,20 +34,22 @@ type CacheEntry struct {
 type AzureBlobContext struct {
     blockCache    []CacheEntry
     contentLength   int64
+    dropData        bool
+    milestoneCount  int64
     tag             string
 }
 
 type MilestoneOp func(*ShortcutAzureBlob, Role, []byte)(bool, int, error)
 
 type ShortcutAzureBlob struct {
-    ctxt          []AzureBlobContext
-    mlst          []MilestoneOp
-    requestCount    int32
-    responseCount   int32
-    impl            ShortcutImpl
+    ctxt           []AzureBlobContext
+    mlst           []MilestoneOp
+    requestCount     int32
+    responseCount    int32
+    impl             ShortcutImpl
 }
 
-func (s *ShortcutAzureBlob) New(route int, client net.Conn, server net.Conn) error {
+func (s *ShortcutAzureBlob) New(route int, client net.Conn, server net.Conn, exits int64, block bool) error {
     s.newContext(route, Client)
     s.newContext(route, Server)
 
@@ -47,7 +58,7 @@ func (s *ShortcutAzureBlob) New(route int, client net.Conn, server net.Conn) err
     s.mlst = append(s.mlst, (*ShortcutAzureBlob).isMilestoneContinue)
     s.mlst = append(s.mlst, (*ShortcutAzureBlob).isMilestoneNone)
 
-    return s.impl.New(route, client, server)
+    return s.impl.New(route, client, server, exits, block)
 }
 
 func (s *ShortcutAzureBlob) newContext(route int, role Role) {
@@ -67,6 +78,8 @@ func (s *ShortcutAzureBlob) newContext(route int, role Role) {
 
         s.ctxt[role].blockCache = make([]CacheEntry, 0)
         s.ctxt[role].contentLength = 0
+        s.ctxt[role].dropData = false
+        s.ctxt[role].milestoneCount = 0
         atomic.StoreInt32(&s.requestCount, 0)
         atomic.StoreInt32(&s.responseCount, 0)
     }
@@ -111,7 +124,23 @@ func (s *ShortcutAzureBlob) isMilestoneRequest(role Role, buffer []byte) (bool, 
             // server only requests of content lengths equal to 4 MiB will be
             // cached so that the last block request/response will prevent the
             // AzCopy from closing connections prematurely.
-            if role == Client && request.Method == "PUT" && request.ContentLength == azcopyBlockSize {
+
+            proxy := false
+            for i := range azcopyBlocksSupported {
+                if request.ContentLength == azcopyBlocksSupported[i] {
+                    proxy = true
+                    break
+                }
+            }
+
+            //_logger.Println(s.ctxt[role].tag, "ContentLength:", request.ContentLength, "proxy:", proxy)
+            if role == Client && request.Method == "PUT" && (proxy || (s.impl.block && s.ctxt[role].dropData)) {
+                s.ctxt[role].milestoneCount = s.ctxt[role].milestoneCount + 1
+                if !s.ctxt[role].dropData && s.impl.block && s.impl.exits >= 0 && s.ctxt[role].milestoneCount >= s.impl.exits /*&& s.ctxt[role].milestoneCount > 1*/ {
+                    //_logger.Println(s.ctxt[role].tag, "Dropping data")
+                    s.ctxt[role].dropData = true
+                }
+
                 s.ctxt[role].contentLength = request.ContentLength
                 atomic.AddInt32(&s.requestCount, 1)
                 s.cachePushBack(role, request.ContentLength, request.Header.Get("Content-MD5"))
@@ -122,7 +151,6 @@ func (s *ShortcutAzureBlob) isMilestoneRequest(role Role, buffer []byte) (bool, 
                     if s.ctxt[role].contentLength == 0 {
                         s.sendResponse(role, len(s.ctxt[role].blockCache) - 1)
                     }
-
                 }
             }
 
@@ -136,7 +164,11 @@ func (s *ShortcutAzureBlob) isMilestoneRequest(role Role, buffer []byte) (bool, 
     }
 
     if foundRequest {
-        takenBytes, takenErr = s.impl.Take(role, buffer)
+        if s.ctxt[role].dropData {
+            takenBytes = len(buffer)
+        } else {
+            takenBytes, takenErr = s.impl.Take(role, buffer)
+        }
     }
 
     return foundRequest, takenBytes, takenErr
@@ -152,12 +184,13 @@ func (s *ShortcutAzureBlob) isMilestoneResponse(role Role, buffer []byte) (bool,
         payload := string(buffer)
         if r, _ := GetHttpResponse(&payload); r != nil {
             foundResponse = true
+            s.ctxt[role].milestoneCount = s.ctxt[role].milestoneCount + 1
 
             //_logger.Println("\n\n", r, "\n\n")
             //_logger.Println(s.ctxt[role].tag, "Response Status:", r.Status)
 
             if role == Server && r.StatusCode == http.StatusCreated {
-                if s.impl.use && atomic.LoadInt32(&s.requestCount) > atomic.LoadInt32(&s.responseCount) {
+                if s.impl.exits >= 0 && s.ctxt[Client].milestoneCount >= s.impl.exits && atomic.LoadInt32(&s.requestCount) > atomic.LoadInt32(&s.responseCount) {
                     atomic.AddInt32(&s.responseCount, 1)
                     dropResponse = true
                     takenBytes = len(buffer)
@@ -186,12 +219,19 @@ func (s *ShortcutAzureBlob) isMilestoneContinue(role Role, buffer []byte) (bool,
         s.updateContentLeft(role, int64(len(buffer)))
 
         if s.ctxt[role].contentLength == 0 {
+            if s.ctxt[role].dropData {
+                atomic.AddInt32(&s.responseCount, 1)
+            }
             s.sendResponse(role, cacheId)
         }
     }
 
     if foundContinue {
-        takenBytes, takenErr = s.impl.Take(role, buffer)
+        if s.ctxt[role].dropData {
+            takenBytes = len(buffer)
+        } else {
+            takenBytes, takenErr = s.impl.Take(role, buffer)
+        }
     }
 
     return foundContinue, takenBytes, takenErr
@@ -199,7 +239,14 @@ func (s *ShortcutAzureBlob) isMilestoneContinue(role Role, buffer []byte) (bool,
 
 func (s *ShortcutAzureBlob) isMilestoneNone(role Role, buffer []byte) (bool, int, error) {
     foundNone := true
-    takenBytes, takenError := s.impl.Take(role, buffer)
+    var takenBytes int = 0
+    var takenError error = nil
+
+    if s.ctxt[role].dropData {
+        takenBytes = len(buffer)
+    } else {
+        takenBytes, takenError = s.impl.Take(role, buffer)
+    }
 
     return foundNone, takenBytes, takenError
 }
@@ -266,7 +313,7 @@ func (s *ShortcutAzureBlob) sendResponse(role Role, blockId int) {
     rspBuf := bytes.NewBuffer(nil)
     rsp.Write(rspBuf)
 
-    if s.impl.use {
+    if s.impl.exits >= 0 && s.ctxt[role].milestoneCount >= s.impl.exits {
         //_logger.Println(s.ctxt[role].tag, " Sending fast response to client for block of size ", s.ctxt[role].blockCache[blockId].contentLength)
         //_logger.Println(rsp, "\n\n")
         s.impl.side[role].Write(rspBuf.Bytes())
