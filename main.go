@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shanebarnes/goto/logger"
 	"github.com/shanebarnes/goto/tokenbucket"
 	"github.com/twinj/uuid"
 )
@@ -23,7 +24,6 @@ import (
 const _VERSION string = "0.5.0"
 
 var _guide GuideImpl
-var _logger *log.Logger = log.New(os.Stdout, "", 0)
 
 type FastRoute struct {
 	Exitno   int64  `json:"exitno"`   // The number of exits until the shortcut
@@ -68,7 +68,7 @@ func main() {
 
 	go sigHandler(&sigs)
 
-	_logger.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+	logger.Init(log.Ldate|log.Ltime|log.Lmicroseconds, logger.Info, os.Stdout)
 
 	itineraryFile := flag.String("itinerary", "itinerary.json", "file containing source and destination routes")
 	flag.Usage = func() {
@@ -96,12 +96,12 @@ func loadItinerary(fileName *string) Itinerary {
 	itinerary := Itinerary{}
 	err := decoder.Decode(&itinerary)
 	if err != nil {
-		_logger.Println(err.Error())
+		logger.PrintlnError(err.Error())
 	}
 
 	_guide.LoadShortcuts(itinerary.Shortcuts)
 
-	_logger.Println("Asking guides for directions")
+	logger.PrintlnInfo("Asking guides for directions")
 
 	var wg sync.WaitGroup
 	wg.Add(len(itinerary.Map))
@@ -125,7 +125,7 @@ func loadItinerary(fileName *string) Itinerary {
 
 	wg.Wait()
 
-	_logger.Printf("Finished asking guides for directions")
+	logger.PrintlnInfo("Finished asking guides for directions")
 
 	return itinerary
 }
@@ -150,7 +150,7 @@ func findDestinations(wg *sync.WaitGroup, route *Route, guide, key string, port 
 				route.Dst = append(route.Dst, dst+":"+strconv.Itoa(port))
 				count = count + 1
 				ask = TimeToLive
-				_logger.Println(guide + ": found " + dst)
+				logger.PrintlnInfo(guide + ": found " + dst)
 			} else {
 				time.Sleep(250 * time.Millisecond)
 			}
@@ -159,7 +159,7 @@ func findDestinations(wg *sync.WaitGroup, route *Route, guide, key string, port 
 		}
 	}
 
-	_logger.Printf("%s: found %d destinations\n", guide, count)
+	logger.PrintlnInfo(guide, ": found", count, "destinations")
 	wg.Done()
 }
 
@@ -204,19 +204,19 @@ func intercept(wg *sync.WaitGroup, route Route) {
 
 	// Add HTTP probe functions to a map class
 	if err == nil {
-		_logger.Println("Listening on", route.Src)
+		logger.PrintlnInfo("Listening on", route.Src)
 		routeCount := 0
 		for {
 			if con, err := listener.Accept(); err == nil {
 				go findRoute(con, &route, routeCount)
 				routeCount = routeCount + 1
 			} else {
-				_logger.Println(err.Error())
+				logger.PrintlnError(err.Error())
 			}
 		}
 		listener.Close()
 	} else {
-		_logger.Println(err.Error())
+		logger.PrintlnError(err.Error())
 	}
 
 	wg.Done()
@@ -226,7 +226,7 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
 	var res error = nil
 	var mp Map = nil
 
-	if route.Inspect { // Proxy mode
+	if route.Inspect { // Proxy mode (tunnel)
 		mp = new(MapHttp)
 	} else if len(route.Dst) > 0 { // Load balancer mode
 		mpTcp := new(MapTcp)
@@ -240,7 +240,7 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
 			startDetour(mp.GetRouteNumber(), src, dst, route, mp)
 		} else {
 			src.Close()
-			_logger.Println(err.Error())
+			logger.PrintlnError(err.Error())
 		}
 	} else {
 		src.Close()
@@ -273,7 +273,7 @@ func setTcpOptions(con net.Conn) {
 }
 
 func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
-	//    _logger.Println("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+	logger.PrintlnInfo("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 
 	setTcpOptions(src)
 	setTcpOptions(dst)
@@ -285,7 +285,7 @@ func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
 	reroute(nil, dst, src, Server, route, mp)
 	wg.Wait()
 
-	//    _logger.Println("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+	logger.PrintlnInfo("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
 
 func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *Route, mp Map) {
@@ -299,8 +299,15 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 	case Server:
 		tag = "SERVER-" + strconv.Itoa(mp.GetRouteNumber())
 	}
-	metrics := MetricsNew(_logger, 1000*1000*1000*1000, -1, tag)
-	tb := tokenbucket.New(uint64(bandwidth), 10*uint64(bandwidth))
+
+	metrics := MetricsNew(1000*1000*1000*1000, -1, tag)
+
+	tbSize := uint64(bandwidth) * 10
+	if bufferSize > uint64(bandwidth) {
+		tbSize = bufferSize * 10
+	}
+
+	tb := tokenbucket.New(uint64(bandwidth), tbSize)
 	buf := make([]byte, bufferSize)
 	defer src.Close()
 	defer dst.Close()
@@ -316,6 +323,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 		size, err := src.Read(buf)
 
 		if err == nil {
+			logger.PrintlnDebug(tag, "read", size, "bytes")
 			mp.Detour(role, buf[:size])
 			metrics.Add(int64(size))
 
@@ -323,6 +331,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 				tb.Return(bufferSize - uint64(size))
 			}
 		} else {
+			logger.PrintlnInfo(tag, err.Error())
 			break
 		}
 	}

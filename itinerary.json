@@ -1,18 +1,18 @@
 {
     "map": {
         "proxy": {
-            "bandwidth": -1,
+            "bandwidth": 10500000000,
             "buffersize": 131072,
-            "inspect": true,
-            "src": "127.0.0.1:8443",
-            "dst": []
+            "inspect": false,
+            "src": "127.0.0.1:5001",
+            "dst": [ "127.0.0.1:5002" ]
         },
         "100M-limit": {
             "bandwidth": 100000000,
             "buffersize": 131072,
             "inspect": false,
             "guide": "https://loadbalancer/hostinfo json_field dst_port",
-            "src": "localhost:5001",
+            "src": "localhost:5003",
             "dst": []
         },
         "no-limit": {

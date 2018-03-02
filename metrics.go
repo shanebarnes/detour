@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"time"
+
+	"github.com/shanebarnes/goto/logger"
 )
 
 type Metrics struct {
-	logger        *log.Logger
 	timeStartNs   int64
 	timeReportNs  int64 // Last report time
 	byteReport    int64
@@ -18,9 +18,8 @@ type Metrics struct {
 	buffer        []string
 }
 
-func MetricsNew(logger *log.Logger, reportIntNs int64, reportIntByte int64, tag string) *Metrics {
+func MetricsNew(reportIntNs int64, reportIntByte int64, tag string) *Metrics {
 	metrics := new(Metrics)
-	metrics.logger = logger
 	metrics.timeStartNs = time.Now().UnixNano()
 	metrics.timeReportNs = metrics.timeStartNs
 	metrics.reportIntNs = reportIntNs
@@ -53,6 +52,6 @@ func (m *Metrics) Dump() {
 	m.Add(0)
 
 	for _, record := range m.buffer {
-		m.logger.Println(record)
+		logger.PrintlnInfo(record)
 	}
 }
