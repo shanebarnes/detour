@@ -19,9 +19,9 @@
             "bandwidth": -1,
             "buffersize": 131072,
             "inspect": false,
-            "src": "localhost:5003",
+            "src": "localhost:8060",
             "dst": [
-                "localhost:5004"
+                "localhost:8080"
             ]
         }
     },

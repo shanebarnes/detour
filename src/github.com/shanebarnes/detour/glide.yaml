@@ -1,3 +1,0 @@
-package: github.com/shanebarnes/detour
-import:
-  - package: github.com/twinj/uuid
