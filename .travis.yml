@@ -2,7 +2,8 @@ language: go
 go:
 - 1.8
 - 1.9
+- 1.10
 install:
-- bash build.sh
+- go get -v ./...
 script:
-- bash build.sh
+- go build -v
