@@ -57,6 +57,7 @@ func (g *GuideImpl) findShortcutAzureBlob(role Role, location string) (bool, Sho
 
 	if role == Client {
 		if strings.HasPrefix(location, "AzCopy") ||
+			strings.HasPrefix(location, "azcopy") ||
 			strings.HasSuffix(location, "azure-storage-go/10.0.2 api-version/2016-05-31 blob") {
 			found = true
 		}
