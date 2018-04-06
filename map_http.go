@@ -19,44 +19,50 @@ type MapHttp struct {
 }
 
 func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
+	var err error = nil
 	var res net.Conn = nil
 
 	buf := make([]byte, 65536)
-	size, err := src.Read(buf) // Assume one read will include entire HTTP header
+	size := 0
 
-	if err == nil {
+	// Assume one read will include entire HTTP header
+	if size, err = src.Read(buf); err == nil {
 		reader := bufio.NewReader(strings.NewReader(string(buf[0:size])))
-		request, _ := http.ReadRequest(reader)
 
-		dstAddr := parseHttpRequestUri(request)
-		dst, err := net.Dial("tcp", dstAddr)
+		var request *http.Request = nil
+		if request, err = http.ReadRequest(reader); err == nil {
 
-		m.Impl.Shortcut = guide.FindShortcut(m.GetRouteNumber(), Client, request.UserAgent(), src, dst)
+			dstAddr := parseHttpRequestUri(request)
+			var dst net.Conn = nil
+			dst, err = net.Dial("tcp", dstAddr)
 
-		if err == nil {
-			if request.Method == "CONNECT" {
-				body := ""
-				rsp := &http.Response{
-					Status:        "200 OK",
-					StatusCode:    http.StatusOK,
-					Proto:         "HTTP/1.1",
-					ProtoMajor:    1,
-					ProtoMinor:    1,
-					Body:          ioutil.NopCloser(bytes.NewBufferString(body)),
-					ContentLength: int64(len(body)),
-					Request:       nil,
-					Header:        make(http.Header, 0),
+			m.Impl.Shortcut = guide.FindShortcut(m.GetRouteNumber(), Client, request.UserAgent(), src, dst)
+
+			if err == nil {
+				if request.Method == "CONNECT" {
+					body := ""
+					rsp := &http.Response{
+						Status:        "200 OK",
+						StatusCode:    http.StatusOK,
+						Proto:         "HTTP/1.1",
+						ProtoMajor:    1,
+						ProtoMinor:    1,
+						Body:          ioutil.NopCloser(bytes.NewBufferString(body)),
+						ContentLength: int64(len(body)),
+						Request:       nil,
+						Header:        make(http.Header, 0),
+					}
+					rspBuf := bytes.NewBuffer(nil)
+					rsp.Write(rspBuf)
+					src.Write(rspBuf.Bytes())
+				} else {
+					m.Impl.Shortcut.Take(Client, buf[:size])
 				}
-				rspBuf := bytes.NewBuffer(nil)
-				rsp.Write(rspBuf)
-				src.Write(rspBuf.Bytes())
-			} else {
-				m.Impl.Shortcut.Take(Client, buf[:size])
-			}
 
-			m.Impl.Src = src
-			m.Impl.Dst = dst
-			res = dst
+				m.Impl.Src = src
+				m.Impl.Dst = dst
+				res = dst
+			}
 		}
 	}
 
