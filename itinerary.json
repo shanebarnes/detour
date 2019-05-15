@@ -3,9 +3,8 @@
         "proxy": {
             "bandwidth": 10500000000,
             "buffersize": 131072,
-            "inspect": false,
-            "src": "127.0.0.1:5001",
-            "dst": [ "127.0.0.1:5002" ]
+            "inspect": true,
+            "src": "127.0.0.1:50443"
         },
         "100M-limit": {
             "bandwidth": 100000000,

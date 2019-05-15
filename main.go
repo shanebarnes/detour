@@ -53,8 +53,7 @@ func sigHandler(ch *chan os.Signal) {
 }
 
 func main() {
-	// This may need to be done in a singleton
-	_ = uuid.Init()
+	uuid.RegisterGenerator(&uuid.GeneratorConfig{Resolution: 18465})
 
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs,

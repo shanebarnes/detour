@@ -41,6 +41,9 @@ func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 			if err == nil {
 				if request.Method == "CONNECT" {
 					body := ""
+					hdr := make(http.Header, 0)
+					hdr.Add("X-Detour-Version", _VERSION)
+
 					rsp := &http.Response{
 						Status:        "200 OK",
 						StatusCode:    http.StatusOK,
@@ -50,7 +53,7 @@ func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 						Body:          ioutil.NopCloser(bytes.NewBufferString(body)),
 						ContentLength: int64(len(body)),
 						Request:       nil,
-						Header:        make(http.Header, 0),
+						Header:        hdr,
 					}
 					rspBuf := bytes.NewBuffer(nil)
 					rsp.Write(rspBuf)
