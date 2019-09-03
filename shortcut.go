@@ -44,7 +44,7 @@ func (s *ShortcutImpl) New(route int, client net.Conn, server net.Conn, exits in
 }
 
 func (s *ShortcutImpl) Take(role Role, buffer []byte) (int, error) {
-	var n int = -1
+	var n int
 	var err error = nil
 	var con net.Conn
 
