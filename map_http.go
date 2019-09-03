@@ -21,6 +21,8 @@ const (
 	eom string = "\r\n\r\n"
 	indent string = "    "
 
+	methodConnect = "CONNECT"
+
 	pseudoHdrAuth = ":authority"
 	pseudoHdrMethod = ":method"
 	pseudoHdrPath = ":path"
@@ -31,7 +33,20 @@ type MapHttp struct {
 	Impl MapImpl
 }
 
-func (m *MapHttp) findHttp1Route(src net.Conn, buf *bytes.Buffer) (string, error) {
+func (m *MapHttp) createDstConn(guide GuideImpl, src net.Conn, hostPort, userAgent string) (net.Conn, error) {
+	dst, err := net.Dial("tcp", hostPort)
+
+	if err == nil {
+		m.Impl.Shortcut = guide.FindShortcut(m.GetRouteNumber(), Client, userAgent, src, dst)
+		m.Impl.Src = src
+		m.Impl.Dst = dst
+	}
+
+	return dst, err
+}
+
+func (m *MapHttp) findHttp1Route(guide GuideImpl, src net.Conn, buf *bytes.Buffer) (string, net.Conn, error) {
+	var dst net.Conn
 	var addr string
 	var err error
 	var request *http.Request
@@ -40,7 +55,7 @@ func (m *MapHttp) findHttp1Route(src net.Conn, buf *bytes.Buffer) (string, error
 	if request, err = http.ReadRequest(reader); err == nil {
 		logger.PrintlnInfo("Found a", request.Proto, "route for a", request.Method, "request to", request.RequestURI)
 
-		if request.Method == "CONNECT" {
+		if request.Method == methodConnect {
 			addr = request.RequestURI
 
 			body := ""
@@ -84,14 +99,17 @@ func (m *MapHttp) findHttp1Route(src net.Conn, buf *bytes.Buffer) (string, error
 				logger.PrintlnError(err.Error())
 			}
 		}
+
+		dst, err = m.createDstConn(guide, src, addr, request.UserAgent())
 	}
 
-	return addr, err
+	return request.Method, dst, err
 }
 
 // Test: export http_proxy=<host>:<port>; curl -I --http2 --http2-prior-knowledge http://www.google.com/
-func (m *MapHttp) findHttp2Route(src net.Conn, buf *bytes.Buffer) (string, error) {
-	var addr string
+func (m *MapHttp) findHttp2Route(guide GuideImpl, src net.Conn, buf *bytes.Buffer) (string, net.Conn, error) {
+	var method string
+	var dst net.Conn
 	var err error
 
 	prefaceLen := len(http2.ClientPreface)
@@ -103,7 +121,7 @@ func (m *MapHttp) findHttp2Route(src net.Conn, buf *bytes.Buffer) (string, error
 		frameReader := http2.NewFramer(ioutil.Discard, buf)
 
 		var frame http2.Frame
-		var authority, method, path, scheme string
+		var addr, authority, path, scheme string
 		decoder := hpack.NewDecoder(2048, nil)
 		for err == nil {
 			frame, err = frameReader.ReadFrame()
@@ -154,18 +172,19 @@ func (m *MapHttp) findHttp2Route(src net.Conn, buf *bytes.Buffer) (string, error
 				addr = authority + ":443"
 			}
 
-			err = nil
+			dst, err = m.createDstConn(guide, src, addr, "user-agent")
 		}
 	} else {
 		err = syscall.ENOPROTOOPT // HTTP/2.0 protocol not available
 	}
 
-	return addr, err
+	return method, dst, err
 }
 
 func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 	var err error
 	var dst net.Conn
+	var method string
 
 	b := make([]byte, 64*1024*1024)
 	buf := bytes.NewBuffer(make([]byte, 0))
@@ -176,18 +195,13 @@ func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 		buf.Write(b[:size])
 		logger.PrintlnDebug("Read", buf.Len(), "bytes")
 
-		var addr string
-		if addr, err = m.findHttp2Route(src, buf); err != nil {
-			addr, err = m.findHttp1Route(src, buf)
+		if method, dst, err = m.findHttp2Route(guide, src, buf); err != nil {
+			method, dst, err = m.findHttp1Route(guide, src, buf)
 		}
 
-		if err == nil {
-			if dst, err = net.Dial("tcp", addr); err == nil {
-				m.Impl.Shortcut = guide.FindShortcut(m.GetRouteNumber(), Client, "blah", src, dst)
-				_, err = m.Impl.Shortcut.Take(Client, b[:size])
-				m.Impl.Src = src
-				m.Impl.Dst = dst
-			}
+		// Only forward original request if not a CONNECT request
+		if err == nil && method != methodConnect {
+			_, err = m.Impl.Shortcut.Take(Client, b[:size])
 		}
 	}
 
