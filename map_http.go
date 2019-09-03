@@ -177,9 +177,9 @@ func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 		logger.PrintlnDebug("Read", buf.Len(), "bytes")
 
 		var addr string
-		//if addr, err = m.findHttp2Route(src, buf); err != nil {
+		if addr, err = m.findHttp2Route(src, buf); err != nil {
 			addr, err = m.findHttp1Route(src, buf)
-		//}
+		}
 
 		if err == nil {
 			if dst, err = net.Dial("tcp", addr); err == nil {
