@@ -35,8 +35,10 @@ type Route struct {
 	Bandwidth  int64    `json:"bandwidth"`  // Bits per second (max travel speed)
 	Buffersize uint64   `json:"buffersize"` // Bytes (max passengers)
 	Delay      int64    `json:"delay"`      // Milliseconds (travel delay)
-	Inspect    bool     `json:"inspect"`    // True = proxy, false = reverse proxy
+	Flow       int      `json:"flow"`       // Flow control one-way or two-way (one-way traffic will always flow from source to destination(s))
 	Guide      string   `json:"guide"`      // HTTP(S) probe to query a load balancer for backend addresses, response field name containing IP address, and static destination port
+	Inspect    bool     `json:"inspect"`    // True = proxy, false = reverse proxy
+	SpeedLimit int64    `json:"speedLimit"` // Speed control in bits per second (maximum speed limit)
 	Src        string   `json:"src"`        // Source/Point of Departure
 	Dst        []string `json:"dst"`        // Destinations
 }
@@ -203,17 +205,17 @@ func intercept(wg *sync.WaitGroup, route Route) {
 
 	// Add HTTP probe functions to a map class
 	if err == nil {
+		defer listener.Close()
 		logger.PrintlnInfo("Listening on", route.Src)
 		routeCount := 0
 		for {
 			if con, err := listener.Accept(); err == nil {
 				go findRoute(con, &route, routeCount)
-				routeCount = routeCount + 1
+				routeCount++
 			} else {
 				logger.PrintlnError(err.Error())
 			}
 		}
-		listener.Close()
 	} else {
 		logger.PrintlnError(err.Error())
 	}
@@ -234,6 +236,21 @@ func findRoute(src net.Conn, route *Route, routeCount int) error {
 	}
 
 	if mp != nil {
+		switch {
+		case route.Flow == 1:
+			mp.GetImpl().Flow = OneWay
+		case route.Flow == 2:
+			mp.GetImpl().Flow = TwoWay
+		case route.Flow >= 3: // Temporary/random closure
+			if (routeCount+1)%route.Flow == 0 {
+				mp.GetImpl().Flow = Closed
+			} else {
+				mp.GetImpl().Flow = TwoWay
+			}
+		default:
+			mp.GetImpl().Flow = Closed
+		}
+
 		mp.GetImpl().RouteNumber = routeCount
 		if dst, err := mp.FindRoute(_guide, src); err == nil {
 			startDetour(mp.GetRouteNumber(), src, dst, route, mp)
@@ -268,21 +285,25 @@ func setTcpOptions(con net.Conn) {
 	//    netFdPtr := val3.FieldByName("sysfd")
 	//    fmt.Printf("netFDPtr= %v\n", netFdPtr)
 	//EnableTcpFastPath(t)
-
 }
 
 func startDetour(id int, src net.Conn, dst net.Conn, route *Route, mp Map) {
-	logger.PrintlnInfo("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
+	logger.PrintlnInfo("Opening route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String(), "flow is", flowText[mp.GetFlow()])
 
-	setTcpOptions(src)
-	setTcpOptions(dst)
+	if mp.GetFlow() != Closed {
+		setTcpOptions(src)
+		setTcpOptions(dst)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	go reroute(&wg, src, dst, Client, route, mp)
-	reroute(nil, dst, src, Server, route, mp)
-	wg.Wait()
+		go reroute(&wg, src, dst, Client, route, mp)
+		go reroute(&wg, dst, src, Server, route, mp)
+		wg.Wait()
+	} else {
+		src.Close()
+		dst.Close()
+	}
 
 	logger.PrintlnInfo("Closing route", id, ":", src.RemoteAddr().String(), "to", dst.RemoteAddr().String())
 }
@@ -322,8 +343,13 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 		size, err := src.Read(buf)
 
 		if err == nil {
-			logger.PrintlnDebug(tag, "read", size, "bytes")
-			mp.Detour(role, buf[:size])
+			if (role == Client && mp.GetFlow() == Closed) ||
+				(role == Server && mp.GetFlow() != TwoWay) {
+				logger.PrintlnDebug(tag, "flow is closed in this direction: blocking", size, "bytes")
+			} else {
+				logger.PrintlnDebug(tag, "flow is open in this direction: detouring", size, "bytes")
+				mp.Detour(role, buf[:size])
+			}
 			metrics.Add(int64(size))
 
 			if size < int(bufferSize) {
@@ -335,7 +361,7 @@ func reroute(wg *sync.WaitGroup, src net.Conn, dst net.Conn, role Role, route *R
 		}
 	}
 
-	//    metrics.Dump()
+	//metrics.Dump()
 
 	if wg != nil {
 		wg.Done()

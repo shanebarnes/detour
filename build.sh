@@ -25,6 +25,6 @@ if [ ! -z "${2}" ]; then
 fi
 
 printf "Compiling packages and dependencies...\n"
-go build -v -ldflags -s
+go build -v -ldflags -s -o detour .
 
 exit $?

@@ -23,10 +23,14 @@ func (m *MapTcp) Detour(role Role, buffer []byte) {
 	m.Impl.Detour(role, buffer)
 }
 
-func (m *MapTcp) GetRouteNumber() int {
-	return m.Impl.GetRouteNumber()
+func (m *MapTcp) GetFlow() Flow {
+	return m.Impl.Flow
 }
 
 func (m *MapTcp) GetImpl() *MapImpl {
 	return &m.Impl
+}
+
+func (m *MapTcp) GetRouteNumber() int {
+	return m.Impl.GetRouteNumber()
 }

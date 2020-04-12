@@ -16,16 +16,15 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
-
 const (
-	eom string = "\r\n\r\n"
+	eom    string = "\r\n\r\n"
 	indent string = "    "
 
 	methodConnect = "CONNECT"
 
-	pseudoHdrAuth = ":authority"
+	pseudoHdrAuth   = ":authority"
 	pseudoHdrMethod = ":method"
-	pseudoHdrPath = ":path"
+	pseudoHdrPath   = ":path"
 	pseudoHdrScheme = ":scheme"
 )
 
@@ -101,6 +100,8 @@ func (m *MapHttp) findHttp1Route(guide GuideImpl, src net.Conn, buf *bytes.Buffe
 		}
 
 		dst, err = m.createDstConn(guide, src, addr, request.UserAgent())
+	} else {
+		logger.PrintlnInfo("connect error: ", err)
 	}
 
 	return request.Method, dst, err
@@ -135,7 +136,7 @@ func (m *MapHttp) findHttp2Route(guide GuideImpl, src net.Conn, buf *bytes.Buffe
 						return nil
 					})
 				case *http2.WindowUpdateFrame:
-					logger.PrintlnDebug("window update:",)
+					logger.PrintlnDebug("window update:")
 					logger.PrintlnDebug(indent, "increment", "=", f.Increment)
 				case *http2.HeadersFrame:
 					logger.PrintlnDebug("headers:")
@@ -210,6 +211,10 @@ func (m *MapHttp) FindRoute(guide GuideImpl, src net.Conn) (net.Conn, error) {
 
 func (m *MapHttp) Detour(role Role, buffer []byte) {
 	m.Impl.Shortcut.Take(role, buffer)
+}
+
+func (m *MapHttp) GetFlow() Flow {
+	return m.Impl.Flow
 }
 
 func (m *MapHttp) GetImpl() *MapImpl {
